@@ -16,3 +16,7 @@ checkpoints/
 
 # Word 临时文件
 ~$*
+
+*.egg-info/
+build/
+dist/

@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "evocode"
+version = "0.1.0"
+description = "A software engineering agent for code repair"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+evocode = "evocode.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
