@@ -9,7 +9,7 @@ def load_task(path: Path) -> dict:
     if not isinstance(data, dict):
         raise ValueError("最外层必须是字典")
 
-    for field in ("task_id", "issue"):
+    for field in ("task_id", "issue", "repo"):
         if field not in data:
             raise ValueError(f"缺少必填字段 {field}")
         value = data[field]

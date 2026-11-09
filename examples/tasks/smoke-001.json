@@ -1,4 +1,5 @@
 {
     "task_id": "smoke-001",
-    "issue": "修复 add(a, b) 错误地执行减法的问题，使其返回两数之和。"
+    "issue": "修复 add(a, b) 错误地执行减法的问题，使其返回两数之和。",
+    "repo": "../repos/add_bug"
   }
