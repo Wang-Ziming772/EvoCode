@@ -5,7 +5,7 @@
 ## 当前进度
 
 已支持从任务文件加载本地代码目录，在临时文件工作区中执行 pytest、
-按白名单编辑 UTF-8 文件并导出 Git 补丁。
+按白名单编辑 UTF-8 文件、导出 Git 补丁，并通过统一工具接口调用这些能力。
 
 ## 第一个功能目标
 
@@ -117,6 +117,68 @@ Path("change.patch").write_bytes(patch.encode("utf-8", errors="surrogateescape")
 路径检查也不防护其他进程并发替换文件造成的竞态。因此不要将此模块当作运行不可信代码
 的安全沙箱。
 
+## 统一工具接口
+
+工具层不依赖特定模型 SDK。`ToolCall` 包含 `call_id`、`name` 和 `arguments`；
+`Observation` 返回对应的 `call_id`、`status`、文本 `content` 和 JSON 元数据
+`metadata`。在工作区上下文内使用：
+
+```python
+from pathlib import Path
+
+from evocode.tasks.workspace import Workspace
+from evocode.tools import ToolCall, ToolContext, create_default_registry
+
+registry = create_default_registry()
+print(registry.get_specs())  # 名称、描述和参数 JSON Schema
+with Workspace(Path("examples/repos/add_bug"), ["calculator.py"]) as workspace:
+    context = ToolContext(workspace)
+    observation = registry.execute(
+        ToolCall("call-1", "read_file", {"path": "calculator.py"}), context
+    )
+    print(observation.status, observation.content, observation.metadata)
+```
+
+默认注册的七个工具如下。所有参数都在调用前按其 JSON Schema 检查，
+不接受表格之外的参数。
+
+| 工具 | 参数 | 用途 |
+| --- | --- | --- |
+| `list_files` | `{}` | 列出可访问的工作区文件 |
+| `read_file` | `{"path": "..."}` | 读取 UTF-8 文本 |
+| `search_code` | `{"query": "..."}` | 搜索字面量，返回路径、行号和片段 |
+| `write_file` | `{"path": "...", "content": "..."}` | 修改白名单内的已有文本文件 |
+| `run_tests` | `{}` | 使用上下文中的测试执行器运行测试 |
+| `git_diff` | `{}` | 查看相对基线的补丁 |
+| `git_status` | `{}` | 查看固定格式的 Git 工作区状态 |
+
+`list_files` 和 `search_code` 不遍历 `.git` 及上文列出的生成目录，也不返回文件接口
+无法访问的路径；搜索区分大小写，跳过非 UTF-8 文件及包含 NUL 的文件。搜索支持跨行
+字面量，行号和片段对应匹配的起始行。文件接口的路径、链接和编辑白名单限制仍然有效。
+Git 工具只执行固定操作；`git_diff` 与 `Workspace.export_patch()` 一样会刷新副本暂存区。
+
+状态 `ok` 表示工具完成，`error` 表示调用或执行异常，`timeout` 表示执行超时。
+异常的 `metadata.error_code` 用于区分未知工具、参数错误、权限错误等。测试进程正常
+结束时，即使 pytest 断言失败，`run_tests` 仍返回 `ok`，并以 `metadata.exit_code` 和
+`metadata.test_outcome` 报告结果；pytest 的内部错误、用法错误和未收集到测试也有各自的
+`test_outcome`。标准输出和标准错误均包含在 `content` 中。
+
+`ToolContext(workspace, test_executor=executor)` 可替换测试执行器。执行器接收当前
+工作区路径，返回包含整数 `returncode`、文本或空值 `stdout` 和 `stderr` 的对象
+（例如 `subprocess.CompletedProcess`）；超时时应抛出 `subprocess.TimeoutExpired` 或
+`TimeoutError`。默认执行器仍使用当前 Python 和 pytest。工作区关闭后不再调用执行器。
+
+每条观察的 `content` 默认最多 16,000 个字符，截断时包含标记并设置
+`metadata.truncated`；元数据也有限额。可通过 `create_default_registry(max_output_chars=...)`
+调整内容上限。文件列表和搜索收集结果最多约 32,000 字符，长搜索片段也会单独标记。
+截断后的 `git_diff` 仅供查看，完整补丁应调用 `Workspace.export_patch()`。
+这些限制约束返回内容，并不构成进程、网络或内存隔离。
+
+需要扩展工具时，可创建空的 `ToolRegistry`，用 `register(Tool(...))` 注册名称、描述、
+参数 schema 和返回 `ToolOutput` 的处理函数。注册表支持 object、array、string、integer、
+number、boolean 和 null，以及 properties、required、additionalProperties、items、enum
+和常用长度或数值上下限；不支持的 schema 关键字会在注册时拒绝，避免静默跳过校验。
+
 ## 验证
 
 在仓库根目录执行：
@@ -126,4 +188,4 @@ uv run --locked --no-python-downloads pytest -q
 ```
 
 测试覆盖 CLI、独立副本、样例修复、补丁应用检查、路径与编辑限制、缓存排除、
-链接拒绝以及正常和异常退出时的清理。
+链接拒绝及清理，也覆盖工具注册、七工具调用、测试反馈、错误和截断。

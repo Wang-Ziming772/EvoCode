@@ -5,7 +5,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePosixPath
 
 from evocode.tasks.paths import validate_relative_path
@@ -30,6 +30,13 @@ _GENERATED_DIRS = frozenset(
 def _is_generated_directory(name: str) -> bool:
     name = name.casefold()
     return name in _GENERATED_DIRS or name.endswith(".egg-info")
+
+
+def _git_excludes() -> list[str]:
+    excludes = [
+        f":(exclude,glob,icase)**/{name}/**" for name in sorted(_GENERATED_DIRS)
+    ]
+    return [*excludes, ":(exclude,glob,icase)**/*.egg-info/**"]
 
 
 def _is_link_or_reparse_point(path: Path, info: os.stat_result) -> bool:
@@ -162,6 +169,11 @@ class Workspace:
             raise RuntimeError("工作区未打开")
         return self.path
 
+    @property
+    def active_path(self) -> Path:
+        """Return the workspace path only while its context is active."""
+        return self._require_active()
+
     def _file_path(self, relative_path: PurePosixPath) -> Path:
         root = self._require_active()
         current = root
@@ -185,6 +197,35 @@ class Workspace:
         path = self._file_path(validate_relative_path(relative_path))
         with path.open("r", encoding="utf-8", newline="") as file:
             return file.read()
+
+    def iter_files(self) -> Iterator[str]:
+        """Yield accessible workspace-relative paths, without following links."""
+        root = self._require_active()
+        _checked_stat(root)
+
+        def walk(directory: Path, relative: PurePosixPath) -> Iterator[str]:
+            with os.scandir(directory) as entries:
+                names = sorted((entry.name for entry in entries), key=lambda name: (name.casefold(), name))
+            for name in names:
+                path = directory / name
+                info = _checked_stat(path)
+                if name.casefold() == ".git":
+                    continue
+                child = relative / name
+                try:
+                    validate_relative_path(child.as_posix())
+                except ValueError:
+                    # Names rejected by the file API cannot be accessed there.
+                    continue
+                if stat.S_ISDIR(info.st_mode):
+                    if not _is_generated_directory(name):
+                        yield from walk(path, child)
+                elif stat.S_ISREG(info.st_mode):
+                    yield child.as_posix()
+                else:
+                    raise ValueError(f"不支持特殊文件：{path}")
+
+        yield from walk(root, PurePosixPath())
 
     def write_file(self, relative_path: str | os.PathLike[str], content: str) -> None:
         relative = validate_relative_path(relative_path)
@@ -254,11 +295,18 @@ class Workspace:
         if not stat.S_ISDIR(_checked_stat(self.path / ".git").st_mode):
             raise ValueError("工作区的 Git 目录无效")
         _check_workspace_tree(self.path, root=True)
-        excludes = [
-            f":(exclude,glob,icase)**/{name}/**" for name in sorted(_GENERATED_DIRS)
-        ]
-        excludes.append(":(exclude,glob,icase)**/*.egg-info/**")
-        self._git("add", "--all", "--force", "--", ".", *excludes)
+        self._git("add", "--all", "--force", "--", ".", *_git_excludes())
+
+    def git_status(self) -> str:
+        """Return the worktree status without staging or accepting Git arguments."""
+        self._require_active()
+        if not stat.S_ISDIR(_checked_stat(self.path / ".git").st_mode):
+            raise ValueError("工作区的 Git 目录无效")
+        _check_workspace_tree(self.path, root=True)
+        return self._git(
+            "-c", "core.quotePath=false", "status", "--porcelain=v1",
+            "--untracked-files=all", "--", ".", *_git_excludes(),
+        )
 
     def export_patch(self) -> str:
         self._require_active()
