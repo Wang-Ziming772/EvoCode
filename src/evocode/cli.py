@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from evocode.tasks.loader import load_task
+from evocode.tasks.workspace import Workspace
 from evocode.tools.testing import run_tests
 
 
@@ -26,11 +27,12 @@ def main() -> None:
     try:
         task_path = args.task.resolve()
         task = load_task(task_path)
-        repo_dir = (task_path.parent / task["repo"]).resolve()
+        repo_dir = (task_path.parent / task["repo"]).absolute()
         if not repo_dir.is_dir():
             raise ValueError(f"代码目录不存在：{repo_dir}")
 
-        result = run_tests(repo_dir)
+        with Workspace(repo_dir, editable_files=task.get("editable_files", [])) as workspace:
+            result = run_tests(workspace.path)
     except subprocess.TimeoutExpired as exc:
         parser.exit(2, f"测试执行超时（{exc.timeout} 秒）\n")
     except (OSError, ValueError) as exc:
