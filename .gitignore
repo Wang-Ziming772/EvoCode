@@ -1,0 +1,18 @@
+# Python 虚拟环境与缓存
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 本地环境配置
+.env
+.env.*
+!.env.example
+
+# 运行结果与模型文件
+runs/
+checkpoints/
+*.safetensors
+
+# Word 临时文件
+~$*
