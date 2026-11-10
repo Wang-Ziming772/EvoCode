@@ -343,6 +343,24 @@ def test_missing_image_fails_without_automatic_pull(docker_ready, tmp_path):
             DockerTestExecutor(image="evocode-image-does-not-exist:unit4")(workspace.path)
 
 
+def test_image_preflight_checks_runtime_and_cleans_probe(docker_ready):
+    executor = RecordingExecutor(timeout_seconds=30)
+    assert executor.check_available().startswith("sha256:")
+    assert_cleaned(executor.last_token)
+    assert not executor.last_snapshot.exists()
+
+
+def test_image_preflight_rejects_incompatible_local_image(docker_ready):
+    image = subprocess.run(["docker", "image", "inspect", "python:3.12-slim"], capture_output=True, timeout=10)
+    if image.returncode:
+        pytest.skip("本地没有 python:3.12-slim 基础镜像")
+    executor = RecordingExecutor(image="python:3.12-slim", timeout_seconds=30)
+    with pytest.raises(DockerExecutionError, match="缺少"):
+        executor.check_available()
+    assert_cleaned(executor.last_token)
+    assert not executor.last_snapshot.exists()
+
+
 def test_real_container_reports_no_tests(docker_ready, tmp_path):
     (tmp_path / "code.py").write_text("value = 1\n", encoding="utf-8")
     executor = RecordingExecutor(timeout_seconds=30)

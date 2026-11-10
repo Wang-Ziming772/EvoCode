@@ -8,6 +8,7 @@
 按白名单编辑 UTF-8 文件、导出 Git 补丁，并通过统一工具接口调用这些能力。
 模型接入层支持两个网关配置档案及一次手动验证的工具往返；最小控制器已支持
 带预算限制的工具调用和独立最终复验，并可显式注入 Docker 测试执行器。
+`repair` 命令将这些能力连接起来，并保存结果、补丁和运行轨迹。
 
 ## 第一个功能目标
 
@@ -58,6 +59,48 @@ Python 解释器和 pytest；输出与退出码来自测试结果。当前 smoke
 命令，无需手动激活环境。
 
 `.venv` 是本地生成的环境目录，不提交到 Git；`.python-version` 和 `uv.lock` 应随项目提交，便于在其他电脑上重建环境。
+
+### 完整修复命令
+
+先启动 Docker Desktop 并切换到 Linux 容器模式，在仓库根目录构建测试镜像：
+
+```powershell
+docker build --pull=false -t evocode-pytest:py312 -f docker/pytest/Dockerfile docker/pytest
+```
+
+按下文的模型配置说明准备 `.env`，然后分别运行：
+
+```powershell
+uv run --locked --no-python-downloads evocode repair --task examples/tasks/smoke-001.json --profile gpt --env-file .env
+uv run --locked --no-python-downloads evocode repair --task examples/tasks/smoke-001.json --profile deepseek --env-file .env
+```
+
+`repair` 使用所选档案原有的模型 ID、思考强度和输出上限；省略 `--profile` 时使用
+`EVOCODE_DEFAULT_PROFILE`。`--env-file` 默认是当前目录的 `.env`。任务路径相对当前
+目录，任务中的 `repo` 相对任务文件所在目录。调用模型前会检查运行目录、Docker Linux
+引擎和本地镜像，并用受限容器确认镜像中的 pytest 与执行器可用。运行时不会自动拉取、
+构建镜像或安装依赖，也不会在 Docker 失败时回退到宿主机测试。
+
+其他选项：`--output-dir` 默认为 `runs`；`--max-steps` 默认为 10；
+`--max-tool-calls` 默认为 30；`--image` 默认为 `evocode-pytest:py312`；
+`--test-timeout` 默认为 30 秒。两项次数上限和超时必须为正数。
+退出码为 `0`（控制器最终复验通过且产物已保存）、`1`（控制器失败或额度耗尽）、
+`2`（参数、配置、启动检查或产物保存错误）或 `130`（用户中断）。
+
+每次运行在结果根目录下创建独立的 UUID 目录：
+
+- `result.json`：状态、原因、模型配置白名单、调用次数、耗时和最终复验摘要。
+- `patch.diff`：工作区相对基线的原始 Git 补丁；失败或额度耗尽时也保留已有修改。
+- `trajectory.jsonl`：逐事件刷新的状态、模型可见文本与 usage 摘要、工具调用及复验结果。
+
+摘要会限制长度并标记截断，缺失的 usage 为 `null`；不会记录 SDK 原始响应或推理字段。
+若终态写入发生异常并恢复，轨迹可能追加修正的 `run_finished`；以最后一条为准。
+已知 API 密钥和 Authorization 凭据会脱敏。为保持补丁原样，如果补丁包含已知密钥或
+明确硬编码的 Authorization 值，命令会拒绝保存该补丁并以错误结束；常见动态认证
+表达式可以保存。输出目录不能位于任务源目录内部。
+补丁不会自动应用到源目录。输出仍包含任务和模型产生的其他内容，应按其敏感程度管理。
+
+目前完成的是 MVP 工程闭环；尚未接入正式 benchmark、批量评测或训练。
 
 ## 文件工作区
 

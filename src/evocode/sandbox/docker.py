@@ -25,6 +25,12 @@ _PYTEST = ["/usr/local/bin/python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/
            "--basetemp=/tmp/pytest-temp"]
 _RUNNER = "/opt/evocode/pytest_runner.py"
 _REPORT_TAIL_BYTES = 4096
+_PROBE = (
+    "import runpy; import pytest; "
+    "m=runpy.run_path('/opt/evocode/pytest_runner.py', run_name='evocode_preflight'); "
+    "assert callable(m.get('main')) and callable(m.get('_report_summary')); "
+    "print('EVOCODE_PYTEST_READY_V1')"
+)
 
 
 class DockerExecutionError(OSError):
@@ -287,6 +293,39 @@ class DockerTestExecutor:
         if volumes:
             raise DockerExecutionError("测试镜像不能声明额外的可写卷")
         return image_id
+
+    def check_available(self) -> str:
+        """Check the Linux engine and test image before any model request."""
+        deadline = time.monotonic() + self.timeout_seconds
+        result = self._command(["info", "--format", "{{.OSType}}"], deadline=deadline)
+        if result.returncode or result.stdout.strip() != b"linux":
+            raise DockerExecutionError("Docker Linux 引擎不可用，请检查 Docker Desktop")
+        image_id = self._image_id(deadline)
+        self._probe_image(image_id, deadline)
+        return image_id
+
+    def _probe_image(self, image_id: str, deadline: float) -> None:
+        token = uuid.uuid4().hex
+        with tempfile.TemporaryDirectory(prefix="evocode-docker-probe-") as temp:
+            snapshot = Path(temp) / "empty"
+            snapshot.mkdir(mode=0o755)
+            os.chmod(snapshot, 0o755)
+            args = self._create_args(image_id, f"evocode-probe-{token}", token, snapshot)
+            args[-2:] = ["-c", _PROBE]
+            try:
+                created = self._command(args, deadline=deadline)
+                if created.returncode:
+                    raise DockerExecutionError("Docker 测试镜像探测容器创建失败")
+                container_id = created.stdout.decode("ascii").strip()
+                if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+                    raise DockerExecutionError("Docker 返回了无效的容器 ID")
+                cli_code, stdout, _stderr = self._attach(container_id, token, deadline)
+                state = self._state(container_id, deadline)
+                if (cli_code != 0 or state["ExitCode"] != 0
+                        or "EVOCODE_PYTEST_READY_V1" not in stdout.text().splitlines()):
+                    raise DockerExecutionError("Docker 测试镜像缺少可用的 pytest 或 EvoCode 测试执行器")
+            finally:
+                self._cleanup(token)
 
     def _create_args(self, image_id: str, name: str, token: str, snapshot: Path) -> list[str]:
         memory = f"{self.memory_mb}m"
