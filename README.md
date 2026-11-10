@@ -6,6 +6,7 @@
 
 已支持从任务文件加载本地代码目录，在临时文件工作区中执行 pytest、
 按白名单编辑 UTF-8 文件、导出 Git 补丁，并通过统一工具接口调用这些能力。
+模型接入层支持两个网关配置档案及一次手动验证的工具往返。
 
 ## 第一个功能目标
 
@@ -179,6 +180,51 @@ Git 工具只执行固定操作；`git_diff` 与 `Workspace.export_patch()` 一�
 number、boolean 和 null，以及 properties、required、additionalProperties、items、enum
 和常用长度或数值上下限；不支持的 schema 关键字会在注册时拒绝，避免静默跳过校验。
 
+## 模型配置与手动验证
+
+在项目根目录的 `.env` 中配置以下字段。已有 `.env` 时保留其中的凭据；新建文件可参照
+`.env.example`，填写对应密钥和网关提供的模型 ID。`.env` 被 Git 忽略，不应提交。
+
+```dotenv
+EVOCODE_DEFAULT_PROFILE=gpt
+EVOCODE_BASE_URL=https://console.gahorouter.com/v1
+EVOCODE_GPT_API_KEY=
+EVOCODE_GPT_MODEL_ID=
+EVOCODE_GPT_MAX_OUTPUT_TOKENS=128000
+EVOCODE_GPT_REASONING_EFFORT=medium
+EVOCODE_DEEPSEEK_API_KEY=
+EVOCODE_DEEPSEEK_MODEL_ID=
+EVOCODE_DEEPSEEK_MAX_OUTPUT_TOKENS=393216
+EVOCODE_DEEPSEEK_REASONING_EFFORT=high
+EVOCODE_REQUEST_TIMEOUT_SECONDS=60
+EVOCODE_MAX_RETRIES=0
+```
+
+系统环境变量优先于 `.env`；调用方可显式选择 `gpt` 或 `deepseek`，只校验所选档案。
+GPT 的思考强度支持 `low`、`medium`、`high`、`xhigh`、`max`；DeepSeek 支持 `none`、
+`low`、`high`、`max`。输出上限和超时必须为正数，重试次数必须是非负整数。配置不会
+猜测模型、切换凭据或自动修改思考强度和输出上限。
+
+`evocode.models.load_model_config(profile, env_file)` 可指定档案和配置文件；省略文件路径
+时读取当前目录的 `.env`。`LLMProvider.generate(messages, registry.get_specs())` 返回
+`LLMResponse`，其中 `tool_calls` 使用现有 `evocode.tools.ToolCall`，缺失的 `usage` 为
+`None`。调用方执行工具后，可使用 `provider.tool_results(response, observations)` 获取
+可追加到下一次 `messages` 的原始 assistant 协议项和匹配的工具结果。GPT 使用 Responses
+API；DeepSeek 使用 Chat Completions。模型 ID 和网关地址按配置使用，协议与 LiteLLM
+路由前缀由适配器处理。
+
+手动验证以下命令，不属于默认 pytest 流程：
+
+```powershell
+uv run --locked --no-python-downloads python scripts/smoke_llm.py --profile gpt
+uv run --locked --no-python-downloads python scripts/smoke_llm.py --profile deepseek
+```
+
+每次验证只在临时工作区开放 `read_file`，最多请求模型两次；其他工具、错误参数、
+缺少工具调用或第二次继续请求工具都会使验证失败。为保证请求次数上限，脚本要求
+`EVOCODE_MAX_RETRIES=0`。常规 `LLMProvider` 按配置的次数重试暂时性失败；脚本不会
+更改该配置或回退到其他模型。网关若不支持相应协议或参数，会返回错误而非自动降级。
+
 ## 验证
 
 在仓库根目录执行：
@@ -188,4 +234,5 @@ uv run --locked --no-python-downloads pytest -q
 ```
 
 测试覆盖 CLI、独立副本、样例修复、补丁应用检查、路径与编辑限制、缓存排除、
-链接拒绝及清理，也覆盖工具注册、七工具调用、测试反馈、错误和截断。
+链接拒绝及清理，也覆盖工具注册、七工具调用、模型配置、两种协议的模拟请求、
+工具往返、错误和截断。自动测试不访问真实模型 API。
