@@ -6,7 +6,8 @@
 
 已支持从任务文件加载本地代码目录，在临时文件工作区中执行 pytest、
 按白名单编辑 UTF-8 文件、导出 Git 补丁，并通过统一工具接口调用这些能力。
-模型接入层支持两个网关配置档案及一次手动验证的工具往返。
+模型接入层支持两个网关配置档案及一次手动验证的工具往返；最小控制器已支持
+带预算限制的工具调用和独立最终复验。
 
 ## 第一个功能目标
 
@@ -225,14 +226,51 @@ uv run --locked --no-python-downloads python scripts/smoke_llm.py --profile deep
 `EVOCODE_MAX_RETRIES=0`。常规 `LLMProvider` 按配置的次数重试暂时性失败；脚本不会
 更改该配置或回退到其他模型。网关若不支持相应协议或参数，会返回错误而非自动降级。
 
+## 最小修复控制器
+
+`AgentController` 把模型 Provider、工具注册表和已有工作区连接起来。调用方建立并关闭
+工作区，同时必须显式提供测试执行器；控制器不会选择宿主机默认测试执行器。例如：
+
+```python
+from evocode.agent import AgentController
+from evocode.tasks.workspace import Workspace
+from evocode.tools import create_default_registry
+
+# provider、source_dir、issue、editable_files 和 test_executor 由调用方提供。
+controller = AgentController(
+    provider=provider, registry=create_default_registry(), max_steps=10, max_tool_calls=30
+)
+with Workspace(source_dir, editable_files=editable_files) as workspace:
+    result = controller.run(issue=issue, workspace=workspace, test_executor=test_executor)
+    print(result.status, result.reason)
+    print(result.model_requests, result.tool_calls, result.last_verification)
+    print(result.final_explanation, result.patch, result.events)
+```
+
+测试执行器接收当前工作区路径，返回带 `returncode`、`stdout` 和 `stderr` 的对象，
+与上文 `ToolContext` 的执行器约定相同。模型自行决定工具及顺序；每次调用通过注册表
+执行，调用结果由 Provider 转换为相应协议的后续消息。模型以非空文本申请完成后，
+控制器会再次调用 `run_tests`：只有观察状态为 `ok`、退出码为 `0` 且测试结果为
+`passed` 才能成功。未通过的复验作为普通消息反馈，不伪造模型工具调用。
+
+`max_steps` 限制模型请求次数，`max_tool_calls` 限制工具调用次数，包括错误调用和
+控制器主动复验；多调用批次超额时整个批次不执行。结果状态包括 `SUCCEEDED`、
+`FAILED` 和 `EXHAUSTED`，中间状态变化可在内存事件中查看。`RunResult` 包含结束原因、
+最后一次完成说明、计数、最后一次复验、工作区补丁和事件。事件只记录状态、调用及
+观察摘要，不记录文件内容、工具参数、凭据或模型原始推理内容。
+
+新增控制器验收使用脚本式假模型与模拟测试执行器；执行器只读取当前副本的文件内容，
+不会运行模型修改后的代码，也不会调用真实模型。项目尚未提供 Docker 或其他进程隔离；
+实际执行不可信修改时，调用方必须提供适当隔离的测试执行器。
+
 ## 验证
 
 在仓库根目录执行：
 
 ```powershell
-uv run --locked --no-python-downloads pytest -q
+uv run --locked --no-python-downloads python -m pytest -q
 ```
 
 测试覆盖 CLI、独立副本、样例修复、补丁应用检查、路径与编辑限制、缓存排除、
 链接拒绝及清理，也覆盖工具注册、七工具调用、模型配置、两种协议的模拟请求、
-工具往返、错误和截断。自动测试不访问真实模型 API。
+工具往返、错误和截断，以及控制器的离线轨迹、预算与复验。自动测试不访问真实模型 API。
