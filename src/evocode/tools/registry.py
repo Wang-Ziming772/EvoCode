@@ -263,6 +263,7 @@ class ToolRegistry:
                 message += f"\n标准错误：\n{stderr}"
             return self._observation(call_id, "timeout", message, {
                 "error_code": "timeout", "timeout_seconds": exc.timeout,
+                "truncated": getattr(exc, "output_truncated", False) is True,
             })
         except TimeoutError as exc:
             return self._observation(call_id, "timeout", f"工具执行超时：{exc}", {"error_code": "timeout"})
@@ -277,4 +278,6 @@ class ToolRegistry:
         except ValueError as exc:
             return self._observation(call_id, "error", f"操作无效：{exc}", {"error_code": "invalid_value"})
         except Exception as exc:
-            return self._observation(call_id, "error", f"工具执行失败：{exc}", {"error_code": "execution_error"})
+            return self._observation(call_id, "error", f"工具执行失败：{exc}", {
+                "error_code": "execution_error", "truncated": getattr(exc, "output_truncated", False) is True,
+            })

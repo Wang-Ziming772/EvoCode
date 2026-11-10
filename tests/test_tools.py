@@ -228,6 +228,19 @@ def test_test_executor_is_not_called_after_workspace_closes(tmp_path):
     assert not seen
 
 
+def test_test_executor_output_truncation_is_propagated(tmp_path):
+    (tmp_path / "file.txt").write_text("text", encoding="utf-8")
+    result = subprocess.CompletedProcess(["pytest"], 1, "short output", "")
+    result.output_truncated = True
+    with Workspace(tmp_path) as workspace:
+        context = ToolContext(workspace, test_executor=lambda _path: result)
+        observation = call(create_default_registry(), context, "run_tests")
+        assert observation.status == "ok" and observation.metadata["truncated"] is True
+        result.output_truncated = "yes"
+        invalid = call(create_default_registry(), context, "run_tests")
+        assert invalid.status == "error" and invalid.metadata["error_code"] == "invalid_test_result"
+
+
 def test_output_truncation_applies_to_all_large_results(tmp_path):
     for index in range(30):
         (tmp_path / f"file_{index:02}.txt").write_text("needle\n" * 20, encoding="utf-8")

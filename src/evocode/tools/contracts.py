@@ -37,7 +37,8 @@ class Observation:
 class ToolContext:
     workspace: Workspace
     # A replacement backend returns a CompletedProcess-compatible result and
-    # raises TimeoutExpired or TimeoutError on timeout.
+    # raises TimeoutExpired or TimeoutError on timeout. It may provide a boolean
+    # output_truncated attribute on its result or TimeoutExpired exception.
     test_executor: TestExecutor = run_tests
 
 

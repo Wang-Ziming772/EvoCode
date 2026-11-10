@@ -7,7 +7,7 @@
 已支持从任务文件加载本地代码目录，在临时文件工作区中执行 pytest、
 按白名单编辑 UTF-8 文件、导出 Git 补丁，并通过统一工具接口调用这些能力。
 模型接入层支持两个网关配置档案及一次手动验证的工具往返；最小控制器已支持
-带预算限制的工具调用和独立最终复验。
+带预算限制的工具调用和独立最终复验，并可显式注入 Docker 测试执行器。
 
 ## 第一个功能目标
 
@@ -260,8 +260,67 @@ with Workspace(source_dir, editable_files=editable_files) as workspace:
 观察摘要，不记录文件内容、工具参数、凭据或模型原始推理内容。
 
 新增控制器验收使用脚本式假模型与模拟测试执行器；执行器只读取当前副本的文件内容，
-不会运行模型修改后的代码，也不会调用真实模型。项目尚未提供 Docker 或其他进程隔离；
-实际执行不可信修改时，调用方必须提供适当隔离的测试执行器。
+不会运行模型修改后的代码，也不会调用真实模型。实际测试时，调用方仍须显式传入
+适当隔离的执行器，例如下面的 `DockerTestExecutor`。
+
+## Docker 隔离测试执行器
+
+启动 Docker Desktop 并切换到 Linux 容器模式，然后在仓库根目录构建本地测试镜像：
+
+```powershell
+docker build --pull=false -t evocode-pytest:py312 -f docker/pytest/Dockerfile docker/pytest
+```
+
+镜像基于固定的 Python 3.12 基础镜像 digest，并固定 pytest 及其依赖版本；构建可能需要
+下载基础镜像和 Python 包。运行测试时不会自动拉取镜像或联网安装依赖。其他项目所需的
+依赖需预先构建到可信的兼容镜像中；该镜像必须提供 `/usr/local/bin/python` 和 pytest，
+以及镜像中的 `/opt/evocode/pytest_runner.py`，且不能声明额外卷。更新执行器后需重新
+构建本地测试镜像。
+
+执行器可以直接注入已有工具层或控制器，不改变 CLI 的默认行为：
+
+```python
+from evocode.sandbox import DockerTestExecutor
+from evocode.tools import ToolCall, ToolContext, create_default_registry
+
+executor = DockerTestExecutor(timeout_seconds=30)
+# workspace 是调用方已进入的 Workspace。
+context = ToolContext(workspace=workspace, test_executor=executor)
+observation = create_default_registry().execute(ToolCall("test-1", "run_tests", {}), context)
+
+# 对 AgentController 同样显式传入：
+# result = controller.run(issue=issue, workspace=workspace, test_executor=executor)
+```
+
+每次调用都从当前工作区创建独立快照，并将快照以只读方式挂载进一次性容器；原工作区
+不被挂载或修改。快照排除 `.git`、上述生成目录、`.env` 和 `.env.*`（保留
+`.env.example`），拒绝符号链接、目录联接及特殊文件。其他文件会被复制，调用方应确认
+工作区中没有不应交给测试代码的秘密。容器不继承宿主机环境变量或 Docker socket。
+
+容器使用非 root 用户、禁用网络、只读根文件系统、删除 Linux capabilities、启用默认
+seccomp 和 `no-new-privileges`，只提供受限的 `/tmp`。默认限制为 30 秒、512 MiB 内存、
+1 CPU、64 个进程、64 MiB 临时空间；快照文件上限为 128 MiB，最多扫描 10,000 个条目
+（包括排除的条目）。标准输出和
+标准错误分别最多保留 65,536 字节，截断会明确标记，并通过 `Observation.metadata.truncated`
+传递给工具调用方。运行命令固定为容器内 pytest，不开放任意命令。
+
+执行器仅在 pytest 正常生成有效的 JUnit XML 报告、至少有一个测试通过且报告中无失败
+或错误时，才接受退出码 0；报告最大为 4 MiB。缺失、无效或所有测试都跳过的报告不会
+判为成功。报告校验防止意外提前退出，并不能防止测试代码故意伪造报告或篡改 pytest。
+
+pytest 的非零退出码作为正常测试结果返回；超时抛出 `subprocess.TimeoutExpired`，
+Docker 镜像、引擎、容器启动或资源错误抛出 `DockerExecutionError`。执行器会清理本次
+创建的容器；若无法确认清理成功，则抛出 `DockerCleanupError` 而不是报告测试成功。
+镜像、超时和资源上限可通过 `DockerTestExecutor` 的构造参数调整。超时涵盖快照和容器
+执行，清理使用独立的时间额度，因此整体耗时可能超过测试超时。
+
+如果 Docker 引擎在创建容器时失联，创建请求可能在清理检查之后才完成；引擎恢复后可用
+`docker ps -a --filter label=io.evocode.test-run` 检查是否存在残留。`/workspace` 只读且
+`/tmp` 不允许执行文件，依赖写入源码目录或执行临时程序的测试需要调整。
+
+这是受限的 Docker 执行环境，不是抵御恶意代码的完整安全边界。Docker 共享内核，
+也不能防护宿主机并发替换文件造成的竞态；处理不可信仓库时应使用独立虚拟机或更强隔离，
+并使用可信 Docker 引擎和镜像。参见 [Docker Engine 安全说明](https://docs.docker.com/engine/security/)。
 
 ## 验证
 
@@ -274,3 +333,5 @@ uv run --locked --no-python-downloads python -m pytest -q
 测试覆盖 CLI、独立副本、样例修复、补丁应用检查、路径与编辑限制、缓存排除、
 链接拒绝及清理，也覆盖工具注册、七工具调用、模型配置、两种协议的模拟请求、
 工具往返、错误和截断，以及控制器的离线轨迹、预算与复验。自动测试不访问真实模型 API。
+Docker 集成测试会在本地 Linux 引擎与 `evocode-pytest:py312` 镜像可用时运行，否则跳过；
+它们不拉取镜像或访问真实模型 API。

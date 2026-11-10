@@ -106,14 +106,15 @@ def _run_tests(context: ToolContext, _arguments: dict[str, Any]) -> ToolOutput:
     code = getattr(result, "returncode", None)
     stdout = getattr(result, "stdout", None)
     stderr = getattr(result, "stderr", None)
+    output_truncated = getattr(result, "output_truncated", False)
     if type(code) is not int or (stdout is not None and not isinstance(stdout, str)) or (
         stderr is not None and not isinstance(stderr, str)
-    ):
+    ) or type(output_truncated) is not bool:
         raise ToolError("invalid_test_result", "测试执行器必须返回退出码和文本输出")
     content = f"标准输出：\n{stdout or ''}\n标准错误：\n{stderr or ''}"
     outcome = {0: "passed", 1: "failed", 2: "interrupted", 3: "internal_error",
                4: "usage_error", 5: "no_tests"}.get(code, "other")
-    return ToolOutput(content, {"exit_code": code, "test_outcome": outcome})
+    return ToolOutput(content, {"exit_code": code, "test_outcome": outcome, "truncated": output_truncated})
 
 
 def _git_diff(context: ToolContext, _arguments: dict[str, Any]) -> ToolOutput:
