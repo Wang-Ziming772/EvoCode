@@ -1,0 +1,10 @@
+*
+!docker/
+!docker/pytest/
+!docker/pytest/pytest_runner.py
+!benchmarks/
+!benchmarks/marshmallow_1359/
+!benchmarks/marshmallow_1359/docker/
+!benchmarks/marshmallow_1359/docker/Dockerfile
+!benchmarks/marshmallow_1359/docker/requirements.txt
+!benchmarks/marshmallow_1359/docker/evocode_import_guard.py

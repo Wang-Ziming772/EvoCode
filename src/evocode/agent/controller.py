@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from evocode.agent.contracts import AgentStatus, RunResult
-from evocode.models import LLMError, LLMProtocolError, LLMResponse, LLMTimeoutError
+from evocode.models import LLMEmptyResponseError, LLMError, LLMLocalError, LLMProtocolError, LLMResponse, LLMTimeoutError
 from evocode.tasks.workspace import Workspace
 from evocode.tools import Observation, ToolCall, ToolContext, ToolRegistry
 from evocode.tools.contracts import TestResult
@@ -30,7 +30,7 @@ _SYSTEM_MESSAGE = (
     "不要输出凭据或隐藏推理过程。"
 )
 _KNOWN_TOOLS = frozenset({
-    "list_files", "read_file", "search_code", "write_file", "run_tests", "git_diff", "git_status",
+    "list_files", "read_file", "search_code", "write_file", "replace_text", "run_tests", "git_diff", "git_status",
 })
 _ERROR_CODES = frozenset({
     "unknown_tool", "invalid_arguments", "invalid_call", "permission_denied", "not_found",
@@ -38,6 +38,13 @@ _ERROR_CODES = frozenset({
     "invalid_test_result",
 })
 _TEST_OUTCOMES = frozenset({"passed", "failed", "interrupted", "internal_error", "usage_error", "no_tests", "other"})
+_MAX_EMPTY_RESPONSE_RETRIES = 2
+_EMPTY_RESPONSE_FEEDBACK = (
+    "上一轮响应已经结束，但没有提供可执行的工具调用或最终回答正文。"
+    "此前的工具结果和工作区修改仍然有效，请基于当前进度继续。"
+    "如果还需检查或修改，请直接调用提供的工具；如果任务已完成，请在最终回答正文中"
+    "简短说明结果，以便控制器独立复验。不要仅在思考内容中结束回答。"
+)
 
 
 def _tool_label(name: Any) -> str:
@@ -116,6 +123,7 @@ class AgentController:
         events: list[dict[str, Any]] = [{"type": "state", "state": self.state.value}]
         model_requests = 0
         tool_calls = 0
+        empty_response_retries = 0
         final_explanation: str | None = None
         last_verification: Observation | None = None
         messages: list[dict[str, Any]] = [
@@ -189,6 +197,29 @@ class AgentController:
                 emit({"type": "model_request", "request": model_requests})
                 try:
                     response = self.provider.generate(copy.deepcopy(messages), specs)
+                except LLMLocalError as exc:
+                    detail = {"type": "model_error", "request": model_requests, "reason": str(exc),
+                              "thinking_present": getattr(self.provider, "last_thinking_present", None),
+                              "usage": getattr(self.provider, "last_usage", None),
+                              "response_metadata": getattr(self.provider, "last_response_metadata", None)}
+                    estimate = getattr(self.provider, "last_input_estimate_bytes", None)
+                    if type(estimate) is int:
+                        detail["input_estimate_bytes"] = estimate
+                    emit(detail)
+                    if isinstance(exc, LLMEmptyResponseError):
+                        if empty_response_retries >= _MAX_EMPTY_RESPONSE_RETRIES:
+                            return finish(AgentStatus.FAILED, f"{exc}；已连续补问两次，仍未得到有效响应")
+                        if model_requests >= self.max_steps:
+                            return finish(AgentStatus.EXHAUSTED, "模型请求轮数已达到上限，无法恢复空响应")
+                        empty_response_retries += 1
+                        messages.append({"role": "user", "content": _EMPTY_RESPONSE_FEEDBACK})
+                        retry_event = {"type": "model_retry", "request": model_requests,
+                                       "reason": "empty_response", "retry": empty_response_retries,
+                                       "limit": _MAX_EMPTY_RESPONSE_RETRIES}
+                        events.append(retry_event)
+                        emit(retry_event)
+                        continue
+                    return finish(AgentStatus.FAILED, str(exc))
                 except (LLMTimeoutError, TimeoutError):
                     return finish(AgentStatus.FAILED, "模型请求超时")
                 except LLMProtocolError:
@@ -200,6 +231,7 @@ class AgentController:
                 except Exception:
                     return finish(AgentStatus.FAILED, "模型请求发生异常")
 
+                empty_response_retries = 0
                 try:
                     content = getattr(response, "content", None)
                     calls = getattr(response, "tool_calls", None)
@@ -215,8 +247,15 @@ class AgentController:
                 events.append({"type": "model_response", "request": model_requests,
                                "has_text": bool(content.strip()), "text_chars": len(content),
                                "tool_count": len(calls)})
-                emit({"type": "model_response", "request": model_requests, "content": content,
-                      "usage": getattr(response, "usage", None), "tool_count": len(calls)})
+                detail = {"type": "model_response", "request": model_requests, "content": content,
+                          "usage": getattr(response, "usage", None), "tool_count": len(calls)}
+                thinking_present = getattr(response, "thinking_present", None)
+                if type(thinking_present) is bool:
+                    detail["thinking_present"] = thinking_present
+                estimate = getattr(self.provider, "last_input_estimate_bytes", None)
+                if type(estimate) is int:
+                    detail["input_estimate_bytes"] = estimate
+                emit(detail)
 
                 if calls:
                     if len(calls) > self.max_tool_calls - tool_calls:

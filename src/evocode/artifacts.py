@@ -251,6 +251,10 @@ class RunArtifacts:
             event.update(request=value["request"], tool_count=value["tool_count"])
             event["content"], event["content_truncated"] = self.redactor.summary(value["content"])
             event["usage"] = _usage(value.get("usage"), self.redactor)
+            if type(value.get("thinking_present")) is bool:
+                event["thinking_present"] = value["thinking_present"]
+            if type(value.get("input_estimate_bytes")) is int:
+                event["input_estimate_bytes"] = value["input_estimate_bytes"]
         elif kind == "tool_call":
             event.update(origin=value["origin"], number=value["number"],
                          call_id=self.redactor.summary(value["call_id"], 256)[0],

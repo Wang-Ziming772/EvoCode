@@ -10,7 +10,8 @@ from typing import Any
 from evocode.agent import AgentController, AgentStatus, RunResult
 from evocode.agent.controller import EventCallbackError
 from evocode.artifacts import ArtifactError, Redactor, RunArtifacts, observation_summary, utc_now
-from evocode.models import ConfigError, LLMProvider, ModelConfig, load_model_config
+from evocode.models import (ConfigError, LLMProvider, ModelConfig, OllamaConfig, OllamaProvider,
+                            LLMLocalError, load_model_config)
 from evocode.sandbox import DockerExecutionError, DockerTestExecutor
 from evocode.tasks.loader import load_task
 from evocode.tasks.workspace import Workspace
@@ -23,8 +24,8 @@ class RepairOptions:
     profile: str | None = None
     env_file: Path = Path(".env")
     output_dir: Path = Path("runs")
-    max_steps: int = 10
-    max_tool_calls: int = 30
+    max_steps: int | None = None
+    max_tool_calls: int | None = None
     image: str = "evocode-pytest:py312"
     test_timeout: float = 30
 
@@ -34,7 +35,7 @@ class RepairExecution:
     task: dict | None
     task_path: Path
     source_dir: Path | None
-    config: ModelConfig | None = field(repr=False)
+    config: ModelConfig | OllamaConfig | None = field(repr=False)
     result: RunResult | None = field(repr=False)
     elapsed_seconds: float
     run_dir: Path | None
@@ -51,7 +52,7 @@ def _error_reason(exc: Exception, redactor: Redactor) -> str:
         return "保存运行轨迹失败"
     if isinstance(exc, subprocess.TimeoutExpired):
         return "Docker 启动检查超时"
-    if isinstance(exc, (ConfigError, DockerExecutionError, ArtifactError, ValueError)):
+    if isinstance(exc, (ConfigError, DockerExecutionError, ArtifactError, LLMLocalError, ValueError)):
         return redactor.summary(str(exc), 1000)[0]
     return "运行准备、工作区清理或产物保存失败"
 
@@ -72,7 +73,9 @@ def run_repair(options: RepairOptions) -> RepairExecution:
     redactor = Redactor(options.env_file)
     task: dict | None = None
     source_dir: Path | None = None
-    config: ModelConfig | None = None
+    config: ModelConfig | OllamaConfig | None = None
+    provider: Any = None
+    max_steps, max_tool_calls = 10, 30
     result: RunResult | None = None
     artifacts: RunArtifacts | None = None
     patch = ""
@@ -80,15 +83,17 @@ def run_repair(options: RepairOptions) -> RepairExecution:
     preparation_error: BaseException | None = None
 
     try:
-        if type(options.max_steps) is not int or options.max_steps <= 0:
+        if options.max_steps is not None and (type(options.max_steps) is not int or options.max_steps <= 0):
             raise ValueError("max_steps 必须是正整数")
-        if type(options.max_tool_calls) is not int or options.max_tool_calls <= 0:
+        if options.max_tool_calls is not None and (type(options.max_tool_calls) is not int or options.max_tool_calls <= 0):
             raise ValueError("max_tool_calls 必须是正整数")
         task = load_task(task_path)
         source_dir = (task_path.parent / task["repo"]).absolute()
         if not source_dir.is_dir():
             raise ValueError("任务代码目录不存在")
         config = load_model_config(options.profile, options.env_file)
+        max_steps = options.max_steps if options.max_steps is not None else (config.max_steps if isinstance(config, OllamaConfig) else 10)
+        max_tool_calls = options.max_tool_calls if options.max_tool_calls is not None else (config.max_tool_calls if isinstance(config, OllamaConfig) else 30)
     except (Exception, KeyboardInterrupt) as exc:
         preparation_error = exc
 
@@ -97,12 +102,21 @@ def run_repair(options: RepairOptions) -> RepairExecution:
         explanation_truncated = False
         if explanation is not None:
             explanation, explanation_truncated = redactor.summary(explanation)
-        model = {
-            "profile": config.profile if config else options.profile,
-            "model_id": redactor.summary(config.model_id, 1000)[0] if config else None,
-            "reasoning_effort": config.reasoning_effort if config else None,
-            "max_output_tokens": config.max_output_tokens if config else None,
-        }
+        if isinstance(config, OllamaConfig):
+            runtime = provider.runtime if isinstance(provider, OllamaProvider) else {}
+            model = {"profile": config.profile, "model_id": redactor.summary(config.model_id, 1000)[0],
+                     "base_url": redactor.summary(config.base_url, 1000)[0],
+                     "think": config.think, "num_ctx": config.num_ctx, "num_predict": config.max_output_tokens,
+                     "request_timeout_seconds": config.request_timeout_seconds, "max_steps": max_steps,
+                     "max_tool_calls": max_tool_calls, "max_retries": config.max_retries,
+                     "keep_alive": config.keep_alive, "sampling": config.sampling,
+                     "ollama_version": runtime.get("ollama_version"), "model_digest": runtime.get("model_digest"),
+                     "actual_num_ctx": runtime.get("actual_num_ctx")}
+        else:
+            model = {"profile": config.profile if config else options.profile,
+                     "model_id": redactor.summary(config.model_id, 1000)[0] if config else None,
+                     "reasoning_effort": config.reasoning_effort if config else None,
+                     "max_output_tokens": config.max_output_tokens if config else None}
         return {
             "schema_version": 1, "run_id": artifacts.run_id if artifacts else None,
             "task_id": redactor.summary(task["task_id"], 1000)[0] if task else None,
@@ -117,6 +131,9 @@ def run_repair(options: RepairOptions) -> RepairExecution:
             "elapsed_seconds": round(time.monotonic() - start, 6),
             "last_verification": observation_summary(result.last_verification, redactor) if result else None,
             "started_at": started_at, "finished_at": utc_now() if finished else None,
+            **({"usage": {"totals": dict(provider.usage_totals) or None,
+                           "observed_calls": dict(provider.usage_observed_calls)}}
+               if isinstance(provider, OllamaProvider) else {}),
         }
 
     try:
@@ -137,9 +154,14 @@ def run_repair(options: RepairOptions) -> RepairExecution:
             executor.check_available()
             with Workspace(source_dir, editable_files=task.get("editable_files", [])) as workspace:
                 try:
+                    provider = OllamaProvider(config) if isinstance(config, OllamaConfig) else LLMProvider(config)
+                    if isinstance(config, OllamaConfig):
+                        released = provider.prepare_for_run()
+                        if released:
+                            artifacts.event({"type": "ollama_unload", "models": released})
                     controller = AgentController(
-                        LLMProvider(config), create_default_registry(),
-                        max_steps=options.max_steps, max_tool_calls=options.max_tool_calls,
+                        provider, create_default_registry(),
+                        max_steps=max_steps, max_tool_calls=max_tool_calls,
                         event_callback=artifacts.event,
                     )
                     result = controller.run(issue=task["issue"], workspace=workspace, test_executor=executor)

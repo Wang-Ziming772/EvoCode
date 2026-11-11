@@ -43,7 +43,18 @@ def _list_files(context: ToolContext, _arguments: dict[str, Any]) -> ToolOutput:
 
 
 def _read_file(context: ToolContext, arguments: dict[str, Any]) -> ToolOutput:
-    return ToolOutput(context.workspace.read_file(arguments["path"]))
+    content = context.workspace.read_file(arguments["path"])
+    if "start_line" not in arguments and "end_line" not in arguments:
+        return ToolOutput(content)
+    lines = content.splitlines(keepends=True)
+    start = int(arguments.get("start_line", 1))
+    end = int(arguments.get("end_line", min(start + 199, len(lines))))
+    if start > len(lines) or end < start or end - start >= 200:
+        raise ToolError("invalid_arguments", "行范围无效，每次最多读取 200 行")
+    end = min(end, len(lines))
+    return ToolOutput("".join(lines[start - 1:end]), {
+        "start_line": start, "end_line": end, "total_lines": len(lines), "has_more": end < len(lines),
+    })
 
 
 def _snippet(text: str, position: int) -> tuple[str, bool]:
@@ -101,6 +112,20 @@ def _write_file(context: ToolContext, arguments: dict[str, Any]) -> ToolOutput:
     return ToolOutput(f"已更新文件：{arguments['path']}")
 
 
+def _replace_text(context: ToolContext, arguments: dict[str, Any]) -> ToolOutput:
+    content = context.workspace.read_file(arguments["path"])
+    old = arguments["old_text"]
+    if not old:
+        raise ToolError("invalid_arguments", "旧文本不能为空")
+    if old == content:
+        raise ToolError("invalid_arguments", "精确替换不能覆盖整个文件")
+    first = content.find(old)
+    if first < 0 or content.find(old, first + 1) >= 0:
+        raise ToolError("invalid_arguments", "旧文本必须恰好匹配一次")
+    context.workspace.write_file(arguments["path"], content.replace(old, arguments["new_text"], 1))
+    return ToolOutput(f"已精确替换文件中的一处文本：{arguments['path']}")
+
+
 def _run_tests(context: ToolContext, _arguments: dict[str, Any]) -> ToolOutput:
     result = context.test_executor(context.workspace.active_path)
     code = getattr(result, "returncode", None)
@@ -132,20 +157,25 @@ def _schema(properties: dict[str, Any] | None = None, required: tuple[str, ...] 
 
 
 def create_default_registry(*, max_output_chars: int = DEFAULT_OUTPUT_LIMIT) -> ToolRegistry:
-    """Create a registry containing exactly the seven built-in tools."""
+    """Create a registry containing the built-in tools."""
     registry = ToolRegistry(max_output_chars=max_output_chars)
     path = {"type": "string", "description": "工作区内的相对文件路径", "minLength": 1, "maxLength": 4096}
     tools = [
         Tool("list_files", "列出可访问的工作区文件，不包括 Git 内部和生成目录。",
              _schema(), _list_files),
-        Tool("read_file", "读取工作区中的 UTF-8 文本文件。",
-             _schema({"path": path}, ("path",)), _read_file),
+        Tool("read_file", "读取 UTF-8 文件；可指定从 1 开始、包含两端的行范围，每次最多 200 行。",
+             _schema({"path": path, "start_line": {"type": "integer", "minimum": 1, "maximum": 1000000},
+                      "end_line": {"type": "integer", "minimum": 1, "maximum": 1000000}}, ("path",)), _read_file),
         Tool("search_code", "区分大小写地搜索字面量，返回路径、行号和片段。",
              _schema({"query": {"type": "string", "minLength": 1, "maxLength": 256}}, ("query",)),
              _search_code),
         Tool("write_file", "替换白名单中已有 UTF-8 文本文件的内容。",
              _schema({"path": path, "content": {"type": "string", "maxLength": 1_000_000}},
                      ("path", "content")), _write_file),
+        Tool("replace_text", "在白名单文件中精确替换唯一匹配的文本，保留其他内容。",
+             _schema({"path": path, "old_text": {"type": "string", "minLength": 1, "maxLength": 1_000_000},
+                      "new_text": {"type": "string", "maxLength": 1_000_000}},
+                     ("path", "old_text", "new_text")), _replace_text),
         Tool("run_tests", "使用上下文中的测试执行器运行测试。", _schema(), _run_tests),
         Tool("git_diff", "查看相对于工作区基线的 Git 补丁。", _schema(), _git_diff),
         Tool("git_status", "查看工作区的 Git 文件状态。", _schema(), _git_status),

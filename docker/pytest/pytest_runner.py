@@ -1,5 +1,6 @@
 """Run pytest and send a bounded JUnit summary to the host executor."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -45,10 +46,14 @@ def _report_summary():
 
 def main():
     token = sys.argv[1]
+    if sys.argv[2:]:
+        encoded = json.dumps(sys.argv[2:], ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+        print("EVOCODE_PYTEST_TARGETS_SHA256=" + hashlib.sha256(encoded).hexdigest(), flush=True)
     command = [
         "/usr/local/bin/python", "-m", "pytest", "-q", "-o", "cache_dir=/tmp/pytest-cache",
         "--basetemp=/tmp/pytest-temp", f"--junitxml={_REPORT}",
     ]
+    command.extend(sys.argv[2:])
     result = subprocess.run(command, stdin=subprocess.DEVNULL, check=False)
     summary = _report_summary()
     summary["exit_code"] = result.returncode

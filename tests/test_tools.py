@@ -71,7 +71,7 @@ def test_specs_are_json_and_registry_validates_custom_tool(tmp_path):
     registry = create_default_registry()
     specs = registry.get_specs()
     assert {spec["name"] for spec in specs} == {
-        "list_files", "read_file", "search_code", "write_file", "run_tests", "git_diff", "git_status",
+        "list_files", "read_file", "search_code", "write_file", "replace_text", "run_tests", "git_diff", "git_status",
     }
     json.dumps(specs, ensure_ascii=False)
     read_spec = next(spec for spec in specs if spec["name"] == "read_file")

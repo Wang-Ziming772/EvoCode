@@ -11,6 +11,7 @@ __pycache__/
 
 # 运行结果与模型文件
 runs/
+.evocode-data/
 checkpoints/
 *.safetensors
 

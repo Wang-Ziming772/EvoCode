@@ -1,6 +1,7 @@
 """Run a fixed pytest command inside a disposable, resource-limited container."""
 
 import csv
+import hashlib
 import io
 import json
 import math
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from evocode.tasks.workspace import _checked_stat, _check_source_path, _is_generated_directory
+from evocode.tasks.paths import validate_relative_path
 
 
 DEFAULT_IMAGE = "evocode-pytest:py312"
@@ -241,6 +243,7 @@ class DockerTestExecutor:
         tmpfs_mb: int = 64, max_output_bytes: int = 65_536,
         max_workspace_bytes: int = 128 * 1024 * 1024, max_entries: int = 10_000,
         cleanup_timeout_seconds: float = 15,
+        pytest_targets: tuple[str, ...] = (),
     ) -> None:
         if not isinstance(image, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*", image):
             raise ValueError("Docker 镜像名称无效")
@@ -261,6 +264,17 @@ class DockerTestExecutor:
         self.max_workspace_bytes = max_workspace_bytes
         self.max_entries = max_entries
         self.cleanup_timeout_seconds = cleanup_timeout_seconds
+        if not isinstance(pytest_targets, tuple) or len(pytest_targets) > 50:
+            raise ValueError("pytest_targets 必须是至多 50 个相对路径组成的元组")
+        targets = []
+        for target in pytest_targets:
+            if not isinstance(target, str):
+                raise ValueError("pytest_targets 必须包含相对路径字符串")
+            path = validate_relative_path(target)
+            if path.parts[0].startswith("-"):
+                raise ValueError("pytest_targets 不能包含 pytest 选项")
+            targets.append(path.as_posix())
+        self.pytest_targets = tuple(targets)
 
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - time.monotonic()
@@ -311,7 +325,7 @@ class DockerTestExecutor:
             snapshot.mkdir(mode=0o755)
             os.chmod(snapshot, 0o755)
             args = self._create_args(image_id, f"evocode-probe-{token}", token, snapshot)
-            args[-2:] = ["-c", _PROBE]
+            args[-(2 + len(self.pytest_targets)):] = ["-c", _PROBE]
             try:
                 created = self._command(args, deadline=deadline)
                 if created.returncode:
@@ -344,7 +358,7 @@ class DockerTestExecutor:
             *[item for name in ("HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "ALL_PROXY", "NO_PROXY",
                                 "http_proxy", "https_proxy", "ftp_proxy", "all_proxy", "no_proxy")
               for item in ("--env", f"{name}=")],
-            "--entrypoint", _PYTEST[0], image_id, _RUNNER, token,
+            "--entrypoint", _PYTEST[0], image_id, _RUNNER, token, *self.pytest_targets,
         ]
 
     def _attach(self, container_id: str, token: str, deadline: float) -> tuple[int, _Output, _ReportOutput]:
@@ -445,6 +459,12 @@ class DockerTestExecutor:
                     if cli_code != state["ExitCode"]:
                         raise DockerExecutionError("Docker 客户端与测试容器的退出状态不一致")
                     _check_runner_report(stderr.report, state["ExitCode"])
+                    if self.pytest_targets:
+                        encoded = json.dumps(list(self.pytest_targets), ensure_ascii=True,
+                                             separators=(",", ":")).encode("utf-8")
+                        marker = "EVOCODE_PYTEST_TARGETS_SHA256=" + hashlib.sha256(encoded).hexdigest()
+                        if marker not in stdout.text().splitlines():
+                            raise DockerExecutionError("测试镜像不支持指定 pytest 测试路径")
                 except (DockerExecutionError, subprocess.TimeoutExpired) as exc:
                     exc.output_truncated = stdout.truncated or stderr.truncated
                     if isinstance(exc, subprocess.TimeoutExpired):

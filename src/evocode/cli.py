@@ -4,6 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from evocode.models.config import LOCAL_PROFILES
 from evocode.tasks.loader import load_task
 from evocode.tasks.workspace import Workspace
 from evocode.tools.testing import run_tests
@@ -86,11 +87,11 @@ def main() -> None:
     subparsers = parser.add_subparsers(dest="command")
     repair = subparsers.add_parser("repair", help="Run a repair with Docker-isolated tests")
     repair.add_argument("--task", type=Path, required=True, help="Path to a task JSON file")
-    repair.add_argument("--profile", choices=("gpt", "deepseek"), help="Model configuration profile")
+    repair.add_argument("--profile", choices=("gpt", "deepseek", *LOCAL_PROFILES), help="Model configuration profile")
     repair.add_argument("--env-file", type=Path, default=Path(".env"), help="Environment configuration file")
     repair.add_argument("--output-dir", type=Path, default=Path("runs"), help="Root for run artifacts")
-    repair.add_argument("--max-steps", type=_positive_int, default=10, help="Maximum model requests")
-    repair.add_argument("--max-tool-calls", type=_positive_int, default=30, help="Maximum tool calls")
+    repair.add_argument("--max-steps", type=_positive_int, default=None, help="Maximum model requests (profile default)")
+    repair.add_argument("--max-tool-calls", type=_positive_int, default=None, help="Maximum tool calls (profile default)")
     repair.add_argument("--image", default="evocode-pytest:py312", help="Local Docker test image")
     repair.add_argument("--test-timeout", type=_positive_float, default=30, help="Test timeout in seconds")
     args = parser.parse_args()

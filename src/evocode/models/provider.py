@@ -25,6 +25,30 @@ class LLMProtocolError(LLMError):
     pass
 
 
+class LLMLocalError(LLMError):
+    """A sanitized local backend failure suitable for a run result."""
+
+
+class LLMContextError(LLMLocalError):
+    pass
+
+
+class LLMIncompleteError(LLMLocalError):
+    pass
+
+
+class LLMEmptyResponseError(LLMIncompleteError):
+    """A completed local turn with neither public text nor tool calls."""
+
+
+class OllamaTimeoutError(LLMTimeoutError, LLMLocalError):
+    pass
+
+
+class OllamaProtocolError(LLMProtocolError, LLMLocalError):
+    pass
+
+
 class _SecretFilter(logging.Filter):
     def __init__(self, *secrets: str) -> None:
         super().__init__()
@@ -100,6 +124,7 @@ class LLMResponse:
     # DeepSeek reasoning_content must survive the tool-result round trip.
     assistant_items: list[dict[str, Any]] = field(default_factory=list, repr=False)
     protocol: str = ""
+    thinking_present: bool | None = None
 
 
 def _plain(value: Any) -> Any:
